@@ -1,15 +1,12 @@
-import logging
-
+import math
+import math
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, apply_std_steer_angle_limits
+from opendbc.car import Bus, apply_std_steer_angle_limits, structs
 from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.tesla.ars408_can import ARS408CAN, should_configure_radar
+from opendbc.car.tesla.ars408_can import ARS408CAN
 from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.values import CarControllerParams
-
-
-log = logging.getLogger(__name__)
 
 
 class CarController(CarControllerBase):
@@ -20,18 +17,32 @@ class CarController(CarControllerBase):
     self.tesla_can = TeslaCAN(self.packer)
     self.ars408_can = ARS408CAN()
 
+  def _radar_motion(self, CS):
+    reverse = CS.out.gearShifter == structs.CarState.GearShifter.reverse
+    standstill = CS.out.standstill or abs(float(CS.out.vEgo)) < 0.05
+    direction = 0 if standstill else (2 if reverse else 1)
+    signed_speed = -abs(float(CS.out.vEgo)) if reverse else abs(float(CS.out.vEgo))
+
+    steer_ratio = max(float(self.CP.steerRatio), 1.0)
+    wheelbase = max(float(self.CP.wheelbase), 0.1)
+    road_wheel_angle = math.radians(float(CS.out.steeringAngleDeg) / steer_ratio)
+    yaw_rate_deg_s = math.degrees(signed_speed * math.tan(road_wheel_angle) / wheelbase)
+    if standstill:
+      yaw_rate_deg_s = 0.0
+    return direction, yaw_rate_deg_s
+
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
     can_sends = []
 
-    # Configure the shared-bus ARS408 throughout its boot window and refresh
-    # occasionally to recover from a radar power reset. The configuration is
-    # volatile, so this does not wear EEPROM. No motion or collision-region
-    # frames are transmitted on TeslaCAN.
-    if should_configure_radar(self.frame):
-      can_sends.append(self.ars408_can.create_radar_configuration())
-      can_sends.append(self.ars408_can.create_object_count_filter())
-      log.info("ARS408 configuration refreshed on Tesla vehicle bus at frame %d", self.frame)
+    # Bus 1 is dedicated to the ARS408. RadarCfg and FilterCfg remain
+    # commissioning-only, while motion inputs are refreshed at 20 Hz. The
+    # sensor times these inputs out after 500 ms and otherwise assumes a
+    # stationary platform, which degrades object dynamics used for lead control.
+    if not self.CP.radarUnavailable and self.frame % 5 == 0:
+      direction, yaw_rate_deg_s = self._radar_motion(CS)
+      can_sends.append(self.ars408_can.create_speed_information(CS.out.vEgo, direction))
+      can_sends.append(self.ars408_can.create_yaw_rate_information(yaw_rate_deg_s))
 
     # Disengage and allow for user override on high torque inputs
     # TODO: move this to a generic disengageRequested carState field and set CC.cruiseControl.cancel based on it

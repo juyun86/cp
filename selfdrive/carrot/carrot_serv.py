@@ -28,6 +28,7 @@ BLINKER_RIGHT = 2
 BLINKER_BOTH = 3
 
 DT_NAV = 0.1
+DEVICE_TIMEZONE = "Asia/Shanghai"
 ACCEL_LIMIT = 1.5*3.6  # m/s²*3.6=km/h，舒适加减速限制
 RESTORE_UP_ACCEL_LIMIT = 3.0*3.6
 RESTORE_DOWN_ACCEL_LIMIT = 1.5*3.6
@@ -1602,7 +1603,9 @@ class CarrotServ:
     #print(json)
     if self.carrotIndex % 60 == 0 and "epochTime" in json:
       # op는 ntp를 사용하기때문에... 필요없는 루틴으로 보임.
-      timezone_remote = json.get("timezone", "Asia/Seoul")
+      # This device is permanently operated in UTC+8. Do not let a phone's
+      # locale overwrite /data/etc/localtime and change timestamps after boot.
+      timezone_remote = DEVICE_TIMEZONE
 
       if not PC:
         self.set_time(int(json.get("epochTime")), timezone_remote)

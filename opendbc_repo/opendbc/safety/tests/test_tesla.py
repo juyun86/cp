@@ -12,14 +12,22 @@ MSG_DAS_steeringControl = 0x488
 MSG_APS_eacMonitor = 0x27d
 MSG_DAS_Control = 0x2b9
 MSG_ARS408_CONFIG = 0x200
-MSG_ARS408_FILTER_CONFIG = 0x202
+MSG_ARS408_ID2_CONFIG = 0x220
+MSG_ARS408_ID5_CONFIG = 0x250
+MSG_ARS408_ID7_CONFIG = 0x270
+MSG_ARS408_ID2_FILTER = 0x222
+MSG_ARS408_ID2_POLYGON = 0x225
+MSG_ARS408_ID2_SPEED = 0x320
+MSG_ARS408_ID2_YAW_RATE = 0x321
+MSG_ARS408_ID0_SPEED = 0x300
+MSG_ARS408_ID0_YAW_RATE = 0x301
 
 
 class TestTeslaSafetyBase(common.PandaCarSafetyTest, common.AngleSteeringSafetyTest, common.LongitudinalAccelSafetyTest):
   RELAY_MALFUNCTION_ADDRS = {0: (MSG_DAS_steeringControl, MSG_APS_eacMonitor)}
   FWD_BLACKLISTED_ADDRS = {2: [MSG_DAS_steeringControl, MSG_APS_eacMonitor]}
   TX_MSGS = [[MSG_DAS_steeringControl, 0], [MSG_APS_eacMonitor, 0], [MSG_DAS_Control, 0],
-             [MSG_ARS408_CONFIG, 1], [MSG_ARS408_FILTER_CONFIG, 1]]
+             [MSG_ARS408_ID0_SPEED, 1], [MSG_ARS408_ID0_YAW_RATE, 1]]
 
   STANDSTILL_THRESHOLD = 0.1
   GAS_PRESSED_THRESHOLD = 3
@@ -98,15 +106,24 @@ class TestTeslaSafetyBase(common.PandaCarSafetyTest, common.AngleSteeringSafetyT
     self._common_measurement_test(self._speed_msg, 0, 285 / 3.6, 1,
                                   self.safety.get_vehicle_speed_min, self.safety.get_vehicle_speed_max)
 
-  def test_ars408_config_is_limited_to_vehicle_bus_and_eight_bytes(self):
-    self.assertTrue(self._tx(common.make_msg(1, MSG_ARS408_CONFIG, 8)))
-    self.assertFalse(self._tx(common.make_msg(0, MSG_ARS408_CONFIG, 8)))
-    self.assertFalse(self._tx(common.make_msg(1, MSG_ARS408_CONFIG, 7)))
+  def test_ars408_production_blocks_all_configuration_frames(self):
+    for address in (MSG_ARS408_CONFIG, MSG_ARS408_ID2_CONFIG, 0x230, MSG_ARS408_ID5_CONFIG, MSG_ARS408_ID7_CONFIG):
+      self.assertFalse(self._tx(common.make_msg(1, address, 8)))
+    for address in (0x202, MSG_ARS408_ID2_FILTER, 0x232, 0x252, 0x272):
+      self.assertFalse(self._tx(common.make_msg(1, address, 5)))
+    for address in (0x205, MSG_ARS408_ID2_POLYGON, 0x235, 0x255, 0x275):
+      self.assertFalse(self._tx(common.make_msg(1, address, 7)))
 
-  def test_ars408_filter_config_is_limited_to_vehicle_bus_and_five_bytes(self):
-    self.assertTrue(self._tx(common.make_msg(1, MSG_ARS408_FILTER_CONFIG, 5)))
-    self.assertFalse(self._tx(common.make_msg(0, MSG_ARS408_FILTER_CONFIG, 5)))
-    self.assertFalse(self._tx(common.make_msg(1, MSG_ARS408_FILTER_CONFIG, 8)))
+  def test_ars408_production_allows_only_id0_motion_inputs(self):
+    for address in (MSG_ARS408_ID0_SPEED, MSG_ARS408_ID0_YAW_RATE):
+      self.assertTrue(self._tx(common.make_msg(1, address, 2)))
+      self.assertFalse(self._tx(common.make_msg(0, address, 2)))
+      self.assertFalse(self._tx(common.make_msg(1, address, 3)))
+
+    for address in (MSG_ARS408_ID2_SPEED, MSG_ARS408_ID2_YAW_RATE, 0x350, 0x351):
+      self.assertFalse(self._tx(common.make_msg(1, address, 2)))
+      self.assertFalse(self._tx(common.make_msg(0, address, 2)))
+      self.assertFalse(self._tx(common.make_msg(1, address, 3)))
 
 class TestTeslaStockSafety(TestTeslaSafetyBase):
 

@@ -4,6 +4,7 @@ from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.radar_interface import RadarInterface
 from opendbc.car.tesla.values import TeslaSafetyFlags
+from openpilot.common.params import Params
 
 
 class CarInterface(CarInterfaceBase):
@@ -22,7 +23,9 @@ class CarInterface(CarInterfaceBase):
     ret.steerAtStandstill = True
 
     ret.steerControlType = structs.CarParams.SteerControlType.angle
-    ret.radarUnavailable = False
+    # Preserve the existing radar-enabled behavior when upgrading from a build
+    # that did not have this setting. Only an explicit "0" selects radarless CP.
+    ret.radarUnavailable = Params().get("EnableArs408Radar") == b"0"
     ret.radarTimeStep = 1.0 / 14.0
 
     ret.alphaLongitudinalAvailable = True

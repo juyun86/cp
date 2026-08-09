@@ -250,7 +250,7 @@ class MyTrack:
       self.yRel = self.yRel_avg.update(radar_point.yRel)
       self.yvRel = self.yvRel_avg.update(radar_point.yvRel)
 
-      if True: #math.isnan(radar_point.aRel): # 
+      if math.isnan(radar_point.aRel):
         v_lead_filtered = self.vLead_avg.update(self.vLead)
         pseudo_stop = abs(v_lead_filtered) < 0.3 and abs(self.vLead - v_lead_filtered) < 0.05
         a_raw = (v_lead_filtered - self.v_lead_filtered_last) / self.dt
@@ -266,6 +266,8 @@ class MyTrack:
         self.aLead = a_lead
         self.jLead = self.jLead_avg.update(j_lead if self.cnt > 2 else 0.0)
       else:
+        # ARS408 Obj_ArelLong is relative acceleration. Convert it to the
+        # tracked object's absolute acceleration with delayed ego acceleration.
         a_lead = radar_point.aRel + a_ego
         j_lead = (a_lead - self.aLead) / self.dt
         self.aLead = a_lead

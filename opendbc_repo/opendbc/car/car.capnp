@@ -361,6 +361,18 @@ struct RadarData @0x888ad6581cf0aacb {
     vLead @7 :Float32; # m/s
     aLead @8 :Float32; # m/s^2
     jLead @9 :Float32; # m/s^3
+
+    # Optional ARS408 object metadata. classValid distinguishes a real Point
+    # classification (0) from a cycle where the Extended frame was missing.
+    objectClass @10 :UInt8;
+    classValid @11 :Bool;
+    aRelLat @12 :Float32; # m/s^2
+    orientation @13 :Float32; # deg
+    length @14 :Float32; # m
+    width @15 :Float32; # m
+    rcs @16 :Float32; # dBm^2
+    probability @17 :UInt8; # ARS408 probability bucket, 0..7
+    dynamicProperty @18 :UInt8; # ARS408 dynamic-property enum, 0..7
   }
 
   enum ErrorDEPRECATED {

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+from datetime import datetime
+import json
 import os
+from pathlib import Path
 import time
 import threading
 
@@ -16,7 +19,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_specific import CarSpecificEvents
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import Events, ET, EVENT_NAME
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 from openpilot.selfdrive.controls.lib.latcontrol import MIN_LATERAL_CONTROL_SPEED
@@ -39,6 +42,7 @@ ButtonType = car.CarState.ButtonEvent.Type
 SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+TAKEOVER_DIAGNOSTIC_PATH = Path("/data/media/0/diagnostics/takeover_events.jsonl")
 
 
 class SelfdriveD:
@@ -117,6 +121,12 @@ class SelfdriveD:
     self.events_prev = []
     self.logged_comm_issue = None
     self.not_running_prev = None
+    self.diagnostic_alert_signature = None
+    self.diagnostic_event_names = ()
+    self.diagnostic_decel_active = False
+    self.diagnostic_last_decel_log = 0.0
+    self.diagnostic_last_commanded_accel = 0.0
+    self.diagnostic_last_planned_accel = 0.0
     self.experimental_mode = False
     self.personality = self.read_personality_param()
     self.recalibrating_seen = False
@@ -578,12 +588,138 @@ class SelfdriveD:
       self.pm.send('onroadEvents', ce_send)
     self.events_prev = self.events.names.copy()
 
+  @staticmethod
+  def _diagnostic_lead(lead):
+    return {
+      "status": bool(lead.status),
+      "radar": bool(lead.radar),
+      "trackId": int(lead.radarTrackId),
+      "dRel": round(float(lead.dRel), 3),
+      "yRel": round(float(lead.yRel), 3),
+      "vRel": round(float(lead.vRel), 3),
+      "vLead": round(float(lead.vLead), 3),
+      "aRel": round(float(lead.aRel), 3),
+      "aLead": round(float(lead.aLead), 3),
+      "class": int(lead.objectClass),
+      "classValid": bool(lead.classValid),
+      "probability": int(lead.probability),
+      "dynamicProperty": int(lead.dynamicProperty),
+    }
+
+  def log_takeover_diagnostic(self, CS):
+    alert = self.AM.current_alert
+    alert_signature = (alert.alert_type, alert.alert_text_1, alert.alert_text_2)
+    event_names = tuple(self.events.names)
+    car_control = self.sm['carControl']
+    controls_state = self.sm['controlsState']
+    long_plan = self.sm['longitudinalPlan']
+    radar_state = self.sm['radarState']
+    now_mono = time.monotonic()
+
+    commanded_accel = float(car_control.actuators.accel)
+    planned_accel = float(long_plan.aTarget)
+    sudden_accel_drop = self.active and (commanded_accel < self.diagnostic_last_commanded_accel - 0.6 or
+                                         planned_accel < self.diagnostic_last_planned_accel - 0.6)
+    decel_active = self.active and (min(commanded_accel, planned_accel, float(CS.aEgo)) <= -0.5 or sudden_accel_drop)
+    alert_changed = alert_signature != self.diagnostic_alert_signature
+    enabled_events_changed = self.enabled and event_names != self.diagnostic_event_names
+    decel_due = decel_active and (not self.diagnostic_decel_active or now_mono - self.diagnostic_last_decel_log >= 2.0)
+
+    self.diagnostic_alert_signature = alert_signature
+    self.diagnostic_event_names = event_names
+    self.diagnostic_decel_active = decel_active
+    self.diagnostic_last_commanded_accel = commanded_accel
+    self.diagnostic_last_planned_accel = planned_accel
+    if not ((alert_changed and (alert.alert_text_1 or alert.alert_text_2)) or enabled_events_changed or decel_due):
+      return
+    if decel_due:
+      self.diagnostic_last_decel_log = now_mono
+
+    record = {
+      "localTime": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+      "monotonic": round(now_mono, 3),
+      "reason": {
+        "alertChanged": alert_changed,
+        "enabledEventsChanged": enabled_events_changed,
+        "decelSnapshot": decel_due,
+        "suddenAccelDrop": sudden_accel_drop,
+      },
+      "state": str(self.state_machine.state),
+      "enabled": bool(self.enabled),
+      "active": bool(self.active),
+      "events": [EVENT_NAME.get(event, str(event)) for event in event_names],
+      "alert": {
+        "type": alert.alert_type,
+        "text1": alert.alert_text_1,
+        "text2": alert.alert_text_2,
+        "status": str(alert.alert_status),
+      },
+      "car": {
+        "gear": str(CS.gearShifter),
+        "vEgo": round(float(CS.vEgo), 3),
+        "aEgo": round(float(CS.aEgo), 3),
+        "vCruise": round(float(CS.vCruise), 3),
+        "standstill": bool(CS.standstill),
+        "gasPressed": bool(CS.gasPressed),
+        "brakePressed": bool(CS.brakePressed),
+      },
+      "command": {
+        "enabled": bool(car_control.enabled),
+        "longActive": bool(car_control.longActive),
+        "accel": round(commanded_accel, 3),
+        "aTarget": round(float(car_control.actuators.aTarget), 3),
+        "jerk": round(float(car_control.actuators.jerk), 3),
+      },
+      "controls": {
+        "longControlState": str(controls_state.longControlState),
+        "forceDecel": bool(controls_state.forceDecel),
+        "upAccelCmd": round(float(controls_state.upAccelCmd), 3),
+        "uiAccelCmd": round(float(controls_state.uiAccelCmd), 3),
+        "ufAccelCmd": round(float(controls_state.ufAccelCmd), 3),
+      },
+      "plan": {
+        "source": str(long_plan.longitudinalPlanSource),
+        "aTarget": round(planned_accel, 3),
+        "vTargetNow": round(float(long_plan.vTargetNow), 3),
+        "cruiseTarget": round(float(long_plan.cruiseTarget), 3),
+        "shouldStop": bool(long_plan.shouldStop),
+        "allowBrake": bool(long_plan.allowBrake),
+        "speeds": [round(float(value), 3) for value in list(long_plan.speeds)[:5]],
+        "accels": [round(float(value), 3) for value in list(long_plan.accels)[:5]],
+      },
+      "radar": {
+        "errors": {
+          "canError": bool(radar_state.radarErrors.canError),
+          "radarFault": bool(radar_state.radarErrors.radarFault),
+          "radarUnavailableTemporary": bool(radar_state.radarErrors.radarUnavailableTemporary),
+          "wrongConfig": bool(radar_state.radarErrors.wrongConfig),
+        },
+        "leadOne": self._diagnostic_lead(radar_state.leadOne),
+        "leadLeft": self._diagnostic_lead(radar_state.leadLeft),
+        "leadRight": self._diagnostic_lead(radar_state.leadRight),
+      },
+      "pandas": [{
+        "controlsAllowed": bool(panda.controlsAllowed),
+        "safetyRxChecksInvalid": bool(panda.safetyRxChecksInvalid),
+        "safetyModel": str(panda.safetyModel),
+      } for panda in self.sm['pandaStates']],
+    }
+
+    try:
+      TAKEOVER_DIAGNOSTIC_PATH.parent.mkdir(parents=True, exist_ok=True)
+      with TAKEOVER_DIAGNOSTIC_PATH.open("a", encoding="utf-8") as diagnostic_file:
+        diagnostic_file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+      cloudlog.exception("failed to write takeover diagnostic")
+
   def step(self):
     CS = self.data_sample()
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
     self.update_alerts(CS)
+
+    self.log_takeover_diagnostic(CS)
 
     self.publish_selfdriveState(CS)
 

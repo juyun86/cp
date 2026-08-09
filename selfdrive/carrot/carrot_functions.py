@@ -7,6 +7,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.filter_simple import MyMovingAverage
 from openpilot.selfdrive.selfdrived.events import Events
+from openpilot.common.swaglog import cloudlog
 
 EventName = log.OnroadEvent.EventName
 LaneChangeState = log.LaneChangeState
@@ -40,6 +41,10 @@ class TrafficState(Enum):
     return self.name
 
 A_CRUISE_MAX_BP_CARROT = [0., 10 * CV.KPH_TO_MS, 40 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 110 * CV.KPH_TO_MS, 140 * CV.KPH_TO_MS]
+
+TRAFFIC_STOP_CONFIRM_TIME = 0.30
+TRAFFIC_STOP_RELEASE_TIME = 0.50
+TRAFFIC_START_CONFIRM_TIME = 0.20
 
 class CarrotPlanner:
   def __init__(self):
@@ -77,6 +82,7 @@ class CarrotPlanner:
 
     self.startSignCount = 0
     self.stopSignCount = 0
+    self.noStopSignCount = 0
 
     self.stop_distance = 6.0
     self.trafficStopDistanceAdjust = 2.0 #params.get_float("TrafficStopDistanceAdjust") / 100.
@@ -241,10 +247,16 @@ class CarrotPlanner:
     model_v = self.vFilter.process(v[-1])
     startSign = model_v > 5.0 or model_v > (v[0] + 2)
 
+    # Do not create a stop obstacle after there is no longer enough room for a
+    # comfortable stop. This also rejects short, noisy model paths.
+    min_model_x = max(5.0, v_ego ** 2 / (2.0 * max(self.comfortBrake, 0.1)))
+    path_is_plausible = model_x > min_model_x and (len(y) == 0 or abs(y[-1]) < 5.0)
+
     if v_ego_kph < 1.0:
-      stopSign = model_x < 20.0 and model_v < 10.0
+      stopSign = model_x < 20.0 and model_v < 10.0 and path_is_plausible
     elif v_ego_kph < 82.0:
-      stopSign = (model_x < d_rel - 3.0 and
+      stopSign = (path_is_plausible and
+                  model_x < d_rel - 3.0 and
                   model_x < np.interp(v[0] * 3.6, [60, 80], [120.0, 150]) and
                   ((model_v < 3.0) or (model_v < v[0] * 0.7))) #and
                   #abs(y[-1]) < 5.0)
@@ -270,15 +282,24 @@ class CarrotPlanner:
     #   )
     #   else 0
     # )
+    traffic_state_last = self.trafficState
     self.stopSignCount = self.stopSignCount + 1 if stopSign else 0
+    self.noStopSignCount = 0 if stopSign else self.noStopSignCount + 1
     self.startSignCount = self.startSignCount + 1 if startSign and not stopSign else 0
 
-    if self.stopSignCount * DT_MDL > 0.0:
+    if self.stopSignCount * DT_MDL >= TRAFFIC_STOP_CONFIRM_TIME:
       self.trafficState = TrafficState.red
-    elif self.startSignCount * DT_MDL > 0.2:
+    elif traffic_state_last == TrafficState.red and self.noStopSignCount * DT_MDL < TRAFFIC_STOP_RELEASE_TIME:
+      self.trafficState = TrafficState.red
+    elif self.startSignCount * DT_MDL >= TRAFFIC_START_CONFIRM_TIME:
       self.trafficState = TrafficState.green
     else:
       self.trafficState = TrafficState.off
+
+    if self.trafficState != traffic_state_last:
+      cloudlog.info("traffic model state %s -> %s: model_x=%.1f model_v=%.1f v_ego=%.1f a_ego=%.1f d_rel=%.1f stop_frames=%d release_frames=%d plausible=%s",
+                    traffic_state_last, self.trafficState, model_x, model_v, v_ego, a_ego, d_rel,
+                    self.stopSignCount, self.noStopSignCount, path_is_plausible)
 
   def _update_carrot_man(self, sm, v_ego_kph, v_cruise_kph):
     atc_active = False
@@ -399,13 +420,17 @@ class CarrotPlanner:
     stop_model_x = self.xStop
 
     trafficState_last = self.trafficState
-    #self.check_model_stopping(v, v_ego, self.xStop, y)
-    self.check_model_stopping(v_cruise, v, v_ego, a_ego, x[-1], y, radarstate.leadOne.dRel if lead_detected else 1000)
-
-    if self.myDrivingMode == DrivingMode.High or self.trafficLightDetectMode == 0:
+    traffic_detection_enabled = (self.myDrivingMode != DrivingMode.High and
+                                 self.trafficLightDetectMode != 0 and
+                                 abs(carstate.steeringAngleDeg) <= 20)
+    if traffic_detection_enabled:
+      self.check_model_stopping(v_cruise, v, v_ego, a_ego, x[-1], y,
+                                radarstate.leadOne.dRel if lead_detected else 1000)
+    else:
       self.trafficState = TrafficState.off
-    if abs(carstate.steeringAngleDeg) > 20:
-      self.trafficState = TrafficState.off
+      self.stopSignCount = 0
+      self.noStopSignCount = 0
+      self.startSignCount = 0
 
     #self.update_user_control()
 
@@ -437,7 +462,10 @@ class CarrotPlanner:
       elif lead_detected and (radarstate.leadOne.dRel - stop_model_x) < 2.0:
         self.xState = XState.lead
       else:
-        if self.trafficState == TrafficState.green:
+        if self.trafficState == TrafficState.off and v_ego > 0.3:
+          self.xState = XState.e2eCruise
+          self.actual_stop_distance = 0.0
+        elif self.trafficState == TrafficState.green:
           self.events.add(EventName.trafficSignGreen)
           self.xState = XState.e2eCruise
         else:

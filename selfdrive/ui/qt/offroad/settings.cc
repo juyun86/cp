@@ -877,6 +877,8 @@ CarrotPanel::CarrotPanel(QWidget* parent) : QWidget(parent) {
   });
 
 
+  startToggles->addItem(new ParamControl("EnableArs408Radar", "启用 ARS408 雷达",
+    "关闭后使用纯视觉 CP；开启后必须检测到 bus1 雷达 CAN 报文。更改后下次启动车辆生效。", "", this));
   startToggles->addItem(selectCarBtn);
   startToggles->addItem(new CValueControl("modelid", "模型选择(-1)", "-1:默认模型,0:TR16,1:DTR,2:Firehose,3:GWM,4:PP,5:DS,6:DSv2,7:WMI,8:CD210,重启后生效!", -1, 100, 1));
   startToggles->addItem(new CValueControl("HyundaiCameraSCC", "现代: 摄像头SCC(0)", "1:连接SCC的CAN线到摄像头, 2:同步定速状态, 3:原厂长控，不是用摄像头实现SCC的均设置为0", -1, 100, 1));

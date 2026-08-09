@@ -266,18 +266,30 @@ class AmapNaviServ:
     msg = messaging.new_message('amapNavi')
     msg.valid = True
     msg.amapNavi.leftBlind = ((8 if self.shared_data.left_lane_blind else 0) + (4 if self.shared_data.lidar_car_lblind else 0) +
-                              (2 if self.shared_data.left_blind else 0) + (1 if self.shared_data.lidar_lblind else 0))
+                              (2 if self.shared_data.left_blind else 0) +
+                              (1 if self.shared_data.lidar_lblind or self.shared_data.left_blindspot else 0))
     msg.amapNavi.rightBlind = ((8 if self.shared_data.right_lane_blind else 0) + (4 if self.shared_data.lidar_car_rblind else 0) +
-                               (2 if self.shared_data.right_blind else 0) + (1 if self.shared_data.lidar_rblind else 0))
+                               (2 if self.shared_data.right_blind else 0) +
+                               (1 if self.shared_data.lidar_rblind or self.shared_data.right_blindspot else 0))
     msg.amapNavi.leftLine = self.shared_data.left_lane
     msg.amapNavi.rightLine = self.shared_data.right_lane
     msg.amapNavi.lineValid = self.lane_online
     self.pm.send('amapNavi', msg)
 
   def left_blindspot(self):
-    return self.shared_data.left_blind or self.shared_data.lidar_lblind or self.shared_data.left_lane_blind
+    # Tesla DAS rear BSD covers the side/rear area that the forward ARS408
+    # cannot see. Expose it as a virtual lidar blind-zone input so navigation
+    # clients and CP's lane-change gate consume the same fail-safe signal.
+    return bool(self.shared_data.left_blindspot or self.shared_data.left_blind or
+                self.shared_data.lidar_lblind or self.shared_data.left_lane_blind)
   def right_blindspot(self):
-    return self.shared_data.right_blind or self.shared_data.lidar_rblind or self.shared_data.right_lane_blind
+    return bool(self.shared_data.right_blindspot or self.shared_data.right_blind or
+                self.shared_data.lidar_rblind or self.shared_data.right_lane_blind)
+
+  def stock_bsd_available(self):
+    # Values remain None until a live carState has supplied both Tesla DAS BSD
+    # channels. Availability is independent of whether either side is active.
+    return self.shared_data.left_blindspot is not None and self.shared_data.right_blindspot is not None
 
   def _capnp_list_to_list(self, capnp_list, max_items=None):
     """将capnp列表转换为Python列表"""
@@ -1601,8 +1613,9 @@ class AmapNaviServ:
             msg[key] = d[idx]
 
       #雷达或摄像头是否存在标志
-      msg['lidar_l'] = self.shared_data.lidar_l
-      msg['lidar_r'] = self.shared_data.lidar_r
+      stock_bsd_available = self.stock_bsd_available()
+      msg['lidar_l'] = self.shared_data.lidar_l or stock_bsd_available
+      msg['lidar_r'] = self.shared_data.lidar_r or stock_bsd_available
       msg['camera_l'] = self.shared_data.camera_l
       msg['camera_r'] = self.shared_data.camera_r
 
@@ -1628,7 +1641,9 @@ class AmapNaviServ:
         self.shared_data.op_blocked = op_blocked
         self.shared_data.road_blocked = ("隧道" in road_name) or (x_spd_type >= 0 and 0 < x_spd_dist < 500)
 
-      msg['blind_enable'] = (self.shared_data.lidar_l or self.shared_data.camera_l) and (self.shared_data.lidar_r or self.shared_data.camera_r)
+      msg['blind_enable'] = stock_bsd_available or \
+                            ((self.shared_data.lidar_l or self.shared_data.camera_l) and
+                             (self.shared_data.lidar_r or self.shared_data.camera_r))
       msg['op_blocked'] = self.shared_data.op_blocked
       msg['road_blocked'] = self.shared_data.road_blocked
 

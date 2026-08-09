@@ -802,6 +802,15 @@ struct RadarState @0x9a185389d6fdd05f {
     aLead @5 :Float32;
     jLead @16 :Float32;
     score @17 :Float32;
+    objectClass @18 :UInt8;
+    classValid @19 :Bool;
+    length @20 :Float32;
+    width @21 :Float32;
+    orientation @22 :Float32;
+    probability @23 :UInt8;
+    dynamicProperty @24 :UInt8;
+    aRelLat @25 :Float32;
+    rcs @26 :Float32;
   }
 
   # deprecated
